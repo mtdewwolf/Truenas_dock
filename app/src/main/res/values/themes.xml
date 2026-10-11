@@ -1,0 +1,3 @@
+<resources>
+    <style name="Theme.TrueNasDock" parent="android:Theme.Material.NoActionBar" />
+</resources>

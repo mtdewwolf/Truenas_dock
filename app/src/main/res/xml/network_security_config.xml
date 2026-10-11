@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- HTTPS only: TrueNAS revokes API keys used over plain HTTP. Self-signed certs are handled by
+     fingerprint pinning in CertificateTrust, not by relaxing this config. -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false" />
+</network-security-config>
