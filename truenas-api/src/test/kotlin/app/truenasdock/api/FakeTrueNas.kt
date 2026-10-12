@@ -1,5 +1,6 @@
 package app.truenasdock.api
 
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import kotlinx.serialization.json.JsonArray
@@ -28,6 +29,7 @@ class FakeTrueNas(private val handler: FakeTrueNas.(RpcRequest) -> Unit) : AutoC
     val requests = LinkedBlockingQueue<RpcRequest>()
 
     private val server = MockWebServer()
+    private val closed = CountDownLatch(1)
     @Volatile private var socket: WebSocket? = null
 
     init {
@@ -89,9 +91,27 @@ class FakeTrueNas(private val handler: FakeTrueNas.(RpcRequest) -> Unit) : AutoC
             requests += request
             handler(request)
         }
+
+        override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+            webSocket.close(code, reason)
+        }
+
+        override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+            closed.countDown()
+        }
+
+        override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+            closed.countDown()
+        }
     }
 
-    override fun close() = server.close()
+    override fun close() {
+        socket?.let {
+            it.close(1000, null)
+            check(closed.await(5, TimeUnit.SECONDS)) { "Timed out closing test WebSocket" }
+        }
+        server.close()
+    }
 
     companion object {
         val TRUE = JsonPrimitive(true)
