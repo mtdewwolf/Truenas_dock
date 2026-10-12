@@ -5,6 +5,7 @@ import app.truenasdock.api.FakeTrueNas.Companion.loginSuccess
 import app.truenasdock.api.model.ServiceVerb
 import java.util.concurrent.CopyOnWriteArrayList
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
@@ -61,7 +62,7 @@ class TrueNasClientTest {
         val server = fake { defaults(it) }
         val client = connected(server)
         assertEquals(ConnectionState.Connected, client.state.value)
-        assertEquals(listOf("/api/current"), server.upgradePaths)
+        assertEquals("/api/current", server.nextUpgradePath())
 
         val result = client.login(Credentials.ApiKey("admin", "1-secret"))
         assertTrue(result is LoginResult.Success)
@@ -157,7 +158,7 @@ class TrueNasClientTest {
     @Test fun `pending calls fail when socket closes`() = runBlocking {
         val server = fake { defaults(it) } // never answers pool.query
         val client = connected(server)
-        val call = async { runCatching { client.call("pool.query") } }
+        val call = async(start = CoroutineStart.UNDISPATCHED) { runCatching { client.call("pool.query") } }
         server.nextRequest("pool.query")
         client.close()
         assertTrue(call.await().exceptionOrNull() is TrueNasConnectionException)

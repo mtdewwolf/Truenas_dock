@@ -1,6 +1,5 @@
 package app.truenasdock.api
 
-import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import kotlinx.serialization.json.JsonArray
@@ -27,7 +26,6 @@ class FakeTrueNas(private val handler: FakeTrueNas.(RpcRequest) -> Unit) : AutoC
     val certificate: HeldCertificate = HeldCertificate.Builder().addSubjectAlternativeName("localhost").build()
     val fingerprint: String = CertificateTrust.fingerprint(certificate.certificate)
     val requests = LinkedBlockingQueue<RpcRequest>()
-    val upgradePaths = CopyOnWriteArrayList<String>()
 
     private val server = MockWebServer()
     @Volatile private var socket: WebSocket? = null
@@ -40,6 +38,10 @@ class FakeTrueNas(private val handler: FakeTrueNas.(RpcRequest) -> Unit) : AutoC
     }
 
     val url: String get() = "https://localhost:${server.port}"
+
+    fun nextUpgradePath(): String =
+        server.takeRequest(5, TimeUnit.SECONDS)?.url?.encodedPath
+            ?: error("Timed out waiting for WebSocket upgrade")
 
     fun respond(id: String, result: JsonElement) = send(buildJsonObject {
         put("jsonrpc", "2.0"); put("id", id); put("result", result)
@@ -75,7 +77,6 @@ class FakeTrueNas(private val handler: FakeTrueNas.(RpcRequest) -> Unit) : AutoC
     private fun listener() = object : WebSocketListener() {
         override fun onOpen(webSocket: WebSocket, response: Response) {
             socket = webSocket
-            upgradePaths += response.request.url.encodedPath
         }
 
         override fun onMessage(webSocket: WebSocket, text: String) {
