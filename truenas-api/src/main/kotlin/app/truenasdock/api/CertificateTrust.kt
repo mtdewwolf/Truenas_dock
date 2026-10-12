@@ -23,6 +23,11 @@ class CertificateTrust(private val pinnedSha256: String?) {
     var lastRejected: UntrustedCertificateException? = null
         private set
 
+    /** Clears any previously rejected certificate. Called at the start of every `connect()`. */
+    fun clearRejected() {
+        lastRejected = null
+    }
+
     private val systemTrustManager: X509TrustManager = run {
         val factory = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm())
         factory.init(null as KeyStore?)
@@ -39,12 +44,13 @@ class CertificateTrust(private val pinnedSha256: String?) {
             } catch (e: CertificateException) {
                 val leaf = chain.firstOrNull() ?: throw e
                 if (isPinned(leaf)) return
-                lastRejected = UntrustedCertificateException(
+                val rejected = UntrustedCertificateException(
                     sha256Fingerprint = fingerprint(leaf),
                     subject = leaf.subjectX500Principal.name,
                     issuer = leaf.issuerX500Principal.name,
                 )
-                throw e
+                lastRejected = rejected
+                throw rejected
             }
         }
 
@@ -70,7 +76,8 @@ class CertificateTrust(private val pinnedSha256: String?) {
         pinnedSha256 != null && normalize(pinnedSha256) == normalize(fingerprint(cert))
 
     companion object {
-        private val defaultHostnameVerifier: HostnameVerifier = OkHttpClient().hostnameVerifier
+        private val defaultHostnameVerifier: HostnameVerifier =
+            javax.net.ssl.HttpsURLConnection.getDefaultHostnameVerifier()
 
         fun fingerprint(cert: X509Certificate): String =
             MessageDigest.getInstance("SHA-256").digest(cert.encoded)

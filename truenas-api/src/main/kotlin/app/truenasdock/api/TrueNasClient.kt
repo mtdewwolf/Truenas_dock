@@ -16,6 +16,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -67,12 +68,15 @@ data class JobProgress(val jobId: Long, val percent: Double?, val description: S
 class TrueNasClient(
     private val scope: CoroutineScope,
     private val baseHttpClient: OkHttpClient = OkHttpClient(),
+    /** Max time to wait for a single RPC reply before failing the caller. */
+    private val callTimeoutMs: Long = 30_000,
 ) {
     private val nextId = AtomicLong(1)
     private val pending = ConcurrentHashMap<String, CompletableDeferred<JsonElement>>()
     private val updates = MutableSharedFlow<CollectionUpdate>(extraBufferCapacity = 512)
     private val _state = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
     private val _jobs = MutableStateFlow<Map<Long, JsonObject>>(emptyMap())
+    private val log = java.util.logging.Logger.getLogger(TrueNasClient::class.java.name)
 
     @Volatile private var socket: WebSocket? = null
     @Volatile private var httpClient: OkHttpClient = baseHttpClient
@@ -89,6 +93,7 @@ class TrueNasClient(
 
     /** Opens the WebSocket. Throws [UntrustedCertificateException] if the server cert needs approval. */
     suspend fun connect(serverUrl: String, trust: CertificateTrust) {
+        trust.clearRejected()
         close()
         val base = normalizeServerUrl(serverUrl)
         val client = trust.applyTo(baseHttpClient.newBuilder()).build()
@@ -210,7 +215,7 @@ class TrueNasClient(
             if (!ws.send(buildRequest(id, method, params))) {
                 throw TrueNasConnectionException("Failed to send $method; socket is closing")
             }
-            return deferred.await()
+            return withTimeout(callTimeoutMs) { deferred.await() }
         } finally {
             pending.remove(id)
         }
@@ -218,12 +223,30 @@ class TrueNasClient(
 
     private fun handleMessage(text: String) {
         when (val msg = parseIncoming(text)) {
-            is Incoming.Result -> pending[msg.id]?.complete(msg.result)
-            is Incoming.Error -> msg.id?.let { pending[it] }?.completeExceptionally(msg.error)
-            is Incoming.Notification -> if (msg.method == "collection_update") {
-                parseCollectionUpdate(msg.params)?.let { updates.tryEmit(it) }
+            is Incoming.Result -> {
+                if (pending[msg.id]?.complete(msg.result) == null) {
+                    log.fine("Ignoring result for unknown/timed-out call id=${msg.id}")
+                }
             }
-            null -> Unit
+            is Incoming.Error -> {
+                val deferred = msg.id?.let { pending[it] }
+                if (deferred?.completeExceptionally(msg.error) == null) {
+                    log.fine("Ignoring error for unknown/timed-out call id=${msg.id} code=${msg.error.code}")
+                }
+            }
+            is Incoming.Notification -> if (msg.method == "collection_update") {
+                val update = parseCollectionUpdate(msg.params)
+                if (update != null) {
+                    if (!updates.tryEmit(update)) {
+                        log.warning("Dropping collection_update for ${update.collection}; subscribers are behind")
+                    }
+                } else {
+                    log.fine("Ignoring malformed collection_update notification")
+                }
+            } else {
+                log.fine("Ignoring notification method=${msg.method}")
+            }
+            null -> log.fine("Ignoring unparseable WebSocket message")
         }
     }
 
@@ -260,7 +283,17 @@ class TrueNasClient(
                 _jobs.update { current ->
                     when (update.msg) {
                         "removed" -> current - id
-                        else -> current + (id to merge(current[id], update.fields))
+                        else -> {
+                            val merged = current + (id to merge(current[id], update.fields))
+                            if (merged.size > MAX_TRACKED_JOBS && id !in current) {
+                                // _jobs is append-ordered; drop the oldest entries to bound memory
+                                // on long-lived connections where the server never sends "removed".
+                                merged.entries.drop(merged.size - MAX_TRACKED_JOBS)
+                                    .associate { it.key to it.value }
+                            } else {
+                                merged
+                            }
+                        }
                     }
                 }
             }
@@ -268,6 +301,8 @@ class TrueNasClient(
     }
 
     companion object {
+        /** Upper bound for the live `core.get_jobs` view on long-lived connections. */
+        const val MAX_TRACKED_JOBS = 500
         /** Accepts `nas.local`, `https://nas.local`, or `https://10.0.0.5:8443`. Plain HTTP is refused. */
         fun normalizeServerUrl(input: String): HttpUrl {
             val trimmed = input.trim().trimEnd('/')

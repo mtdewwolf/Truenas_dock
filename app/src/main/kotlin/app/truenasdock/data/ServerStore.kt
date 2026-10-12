@@ -27,16 +27,36 @@ data class ServerProfile(
 /**
  * Persists the server profile, with the API key/password encrypted by an Android Keystore AES-GCM
  * key that never leaves the device.
+ *
+ * All methods perform SharedPreferences and Android Keystore I/O and must be called
+ * off the main thread (e.g. `withContext(Dispatchers.IO)`).
  */
 class ServerStore(context: Context) {
     private val prefs = context.getSharedPreferences("server", Context.MODE_PRIVATE)
 
-    fun load(): Pair<ServerProfile, String>? {
-        val profileJson = prefs.getString(KEY_PROFILE, null) ?: return null
-        val secret = prefs.getString(KEY_SECRET, null)?.let { runCatching { decrypt(it) }.getOrNull() } ?: return null
-        val profile = runCatching { TrueNasJson.decodeFromString<ServerProfile>(profileJson) }.getOrNull() ?: return null
-        return profile to secret
+    /** Distinguishes "no saved server" from "saved but unreadable" (Keystore invalidated, etc.). */
+    sealed interface LoadResult {
+        data object Missing : LoadResult
+        data class Success(val profile: ServerProfile, val secret: String) : LoadResult
+        /** Stored data exists but decrypts or parses to nothing usable — caller should prompt to re-enter. */
+        data class Corrupt(val profilePresent: Boolean, val secretPresent: Boolean) : LoadResult
     }
+
+    fun loadResult(): LoadResult {
+        val profileJson = prefs.getString(KEY_PROFILE, null)
+        val secretEncoded = prefs.getString(KEY_SECRET, null)
+        if (profileJson == null && secretEncoded == null) return LoadResult.Missing
+        val secret = secretEncoded?.let { runCatching { decrypt(it) }.getOrNull() }
+        val profile = profileJson?.let { runCatching { TrueNasJson.decodeFromString<ServerProfile>(it) }.getOrNull() }
+        if (profile != null && secret != null) return LoadResult.Success(profile, secret)
+        return LoadResult.Corrupt(profilePresent = profileJson != null, secretPresent = secretEncoded != null)
+    }
+
+    fun load(): Pair<ServerProfile, String>? =
+        when (val result = loadResult()) {
+            is LoadResult.Success -> result.profile to result.secret
+            is LoadResult.Missing, is LoadResult.Corrupt -> null
+        }
 
     fun save(profile: ServerProfile, secret: String) = prefs.edit {
         putString(KEY_PROFILE, TrueNasJson.encodeToString(profile))
